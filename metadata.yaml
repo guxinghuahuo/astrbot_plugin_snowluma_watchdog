@@ -1,0 +1,7 @@
+name: astrbot_plugin_snowluma_watchdog
+display_name: SnowLuma 存活监控
+desc: 通过 SnowLuma OneBot 检查 QQ 在线状态，发送 QQ 离线和可选的恢复邮件。
+version: v0.1.4
+author: guxinghuahuo
+repo: https://github.com/guxinghuahuo/astrbot_plugin_snowluma_watchdog
+astrbot_version: ">=4.10.4"

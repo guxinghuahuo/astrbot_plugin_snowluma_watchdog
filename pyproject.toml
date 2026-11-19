@@ -1,0 +1,16 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".."]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "TID251"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["astrbot_plugin_snowluma_watchdog"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"logging" = { msg = "插件日志须使用 astrbot.api.logger，或由入口注入该日志器。" }
