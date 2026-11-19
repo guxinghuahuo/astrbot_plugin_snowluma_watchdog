@@ -10,7 +10,7 @@ from .settings import MailSettings, Settings
 from .watchdog import LOG_PREFIX, Watchdog
 
 PLUGIN_NAME = "astrbot_plugin_snowluma_watchdog"
-VERSION = "v0.1.4"
+VERSION = "v0.1.5"
 
 
 class SnowLumaWatchdogPlugin(Star):

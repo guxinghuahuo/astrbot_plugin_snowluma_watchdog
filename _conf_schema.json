@@ -40,7 +40,7 @@
   },
   "failure_threshold": {
     "type": "int",
-    "description": "确认 QQ 离线所需的连续离线次数",
+    "description": "确认 QQ 离线或 OneBot HTTP 不可达所需的同类连续失败次数",
     "default": 2
   },
   "recovery_threshold": {

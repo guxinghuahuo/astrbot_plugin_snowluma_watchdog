@@ -19,7 +19,7 @@ from aiohttp import web
 
 from astrbot_plugin_snowluma_watchdog import mail, watchdog
 from astrbot_plugin_snowluma_watchdog.build_package import ROOT, build
-from astrbot_plugin_snowluma_watchdog.probe import ProbeResult, probe
+from astrbot_plugin_snowluma_watchdog.probe import ProbeResult, ProbeStatus, probe
 from astrbot_plugin_snowluma_watchdog.settings import Settings
 from astrbot_plugin_snowluma_watchdog.watchdog import Phase, Watchdog
 
@@ -31,9 +31,9 @@ CONFIG = {
     "smtp_recipient": "alert@example.test",
     "smtp_password": "smtp-secret",
 }
-ONLINE = ProbeResult(online=True)
-OFFLINE = ProbeResult(online=False)
-UNKNOWN = ProbeResult(issue="SnowLuma OneBot HTTP 探测超时")
+ONLINE = ProbeResult(ProbeStatus.ONLINE)
+OFFLINE = ProbeResult(ProbeStatus.OFFLINE)
+UNKNOWN = ProbeResult(ProbeStatus.UNKNOWN, "get_status 响应不是有效的 JSON")
 
 
 @asynccontextmanager
@@ -56,22 +56,22 @@ def onebot(data, *, status="ok", retcode=0):
 
 
 @pytest.mark.parametrize(
-    ("http_status", "data", "online", "fragment"),
+    ("http_status", "data", "status", "fragment"),
     [
-        (200, {"online": True, "good": True}, True, "QQ 在线（online=true）"),
-        (200, {"online": True, "good": False}, True, "QQ 在线（online=true）"),
-        (200, {"online": True, "good": "unknown"}, True, "QQ 在线（online=true）"),
-        (200, {"online": True}, True, "QQ 在线（online=true）"),
-        (200, {"online": False, "good": True}, False, "账号离线"),
-        (200, {"online": "true", "good": True}, None, "缺少布尔型"),
-        (200, {"good": True}, None, "缺少布尔型"),
-        (401, {}, None, "鉴权失败（HTTP 401）"),
-        (403, {}, None, "鉴权失败（HTTP 403）"),
-        (302, {}, None, "返回 HTTP 302"),
-        (503, {}, None, "返回 HTTP 503"),
+        (200, {"online": True, "good": True}, ProbeStatus.ONLINE, "QQ 在线（online=true）"),
+        (200, {"online": True, "good": False}, ProbeStatus.ONLINE, "QQ 在线（online=true）"),
+        (200, {"online": True, "good": "unknown"}, ProbeStatus.ONLINE, "QQ 在线（online=true）"),
+        (200, {"online": True}, ProbeStatus.ONLINE, "QQ 在线（online=true）"),
+        (200, {"online": False, "good": True}, ProbeStatus.OFFLINE, "账号离线"),
+        (200, {"online": "true", "good": True}, ProbeStatus.UNKNOWN, "缺少布尔型"),
+        (200, {"good": True}, ProbeStatus.UNKNOWN, "缺少布尔型"),
+        (401, {}, ProbeStatus.UNKNOWN, "鉴权失败（HTTP 401）"),
+        (403, {}, ProbeStatus.UNKNOWN, "鉴权失败（HTTP 403）"),
+        (302, {}, ProbeStatus.UNKNOWN, "返回 HTTP 302"),
+        (503, {}, ProbeStatus.UNKNOWN, "返回 HTTP 503"),
     ],
 )
-def test_http_status_and_bearer(http_status, data, online, fragment):
+def test_http_status_and_bearer(http_status, data, status, fragment):
     async def scenario():
         received = []
 
@@ -86,14 +86,17 @@ def test_http_status_and_bearer(http_status, data, online, fragment):
             result = await probe(session, Settings.from_config({**CONFIG, "onebot_base_url": url}))
         assert received == [("get_status", "Bearer http-secret")]
         assert fragment in result.description
-        assert result.online is online
+        assert result.status is status
         assert "http-secret" not in result.description
 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize(("returned", "online"), [(12345, True), ("12345", True), (54321, None)])
-def test_expected_qq(returned, online):
+@pytest.mark.parametrize(
+    ("returned", "status"),
+    [(12345, ProbeStatus.ONLINE), ("12345", ProbeStatus.ONLINE), (54321, ProbeStatus.UNKNOWN)],
+)
+def test_expected_qq(returned, status):
     async def scenario():
         async def handler(request):
             if request.match_info["action"] == "get_status":
@@ -105,8 +108,8 @@ def test_expected_qq(returned, online):
                 {**CONFIG, "onebot_base_url": url, "expected_qq": "12345"}
             )
             result = await probe(session, settings)
-        assert result.online is online
-        if online is None:
+        assert result.status is status
+        if status is ProbeStatus.UNKNOWN:
             assert "QQ 号与监控配置不符" in result.description
             assert "54321" not in result.description
 
@@ -130,7 +133,7 @@ def test_invalid_response(body, fragment):
 
         async with local_onebot(handler) as url, aiohttp.ClientSession() as session:
             result = await probe(session, Settings.from_config({**CONFIG, "onebot_base_url": url}))
-        assert result.online is None
+        assert result.status is ProbeStatus.UNKNOWN
         assert fragment in result.description
         assert "http-secret" not in result.description
 
@@ -145,8 +148,74 @@ def test_timeout():
         async with local_onebot(handler) as url, aiohttp.ClientSession() as session:
             settings = Settings.from_config({**CONFIG, "onebot_base_url": url})
             result = await probe(session, replace(settings, request_timeout=0.05))
-        assert result.online is None
+        assert result.status is ProbeStatus.UNREACHABLE
         assert "超时" in result.description
+
+    asyncio.run(scenario())
+
+
+def test_onebot_transport_failure_alert_and_recovery(tmp_path, monkeypatch):
+    async def scenario():
+        send = Mock()
+        monkeypatch.setattr(watchdog, "send_mail", send)
+        replies = iter((401, 401, "partial", 401, "partial", "partial", "partial", True, True))
+
+        async def handler(request):
+            reply = next(replies)
+            if reply == 401:
+                return web.Response(status=401)
+            if reply == "partial":
+                response = web.StreamResponse(headers={"Content-Length": "1024"})
+                await response.prepare(request)
+                await response.write(b"{")
+                request.transport.close()
+                return response
+            return onebot({"online": reply, "good": False})
+
+        async with local_onebot(handler) as url, aiohttp.ClientSession() as session:
+            settings = Settings.from_config({**CONFIG, "onebot_base_url": url})
+            log = Mock()
+            monitor = Watchdog(settings, tmp_path / "watchdog.state", log)
+
+            async def sample():
+                result = await probe(session, settings)
+                await monitor._apply_sample(result)
+                return result.status
+
+            for status in (
+                ProbeStatus.UNKNOWN, ProbeStatus.UNKNOWN, ProbeStatus.UNREACHABLE,
+                ProbeStatus.UNKNOWN, ProbeStatus.UNREACHABLE,
+            ):
+                assert await sample() is status
+                send.assert_not_called()
+            assert await sample() is ProbeStatus.UNREACHABLE
+            send.assert_called_once_with(
+                settings.mail,
+                "[SnowLuma Watchdog] OneBot HTTP 不可达",
+                "监控状态：QQ 在线状态未知：SnowLuma OneBot HTTP 连接或响应传输失败",
+            )
+            assert "确认 OneBot HTTP 不可达" in log.warning.call_args.args[0]
+            assert await sample() is ProbeStatus.UNREACHABLE
+            assert await sample() is ProbeStatus.ONLINE
+            assert send.call_count == 1
+            assert await sample() is ProbeStatus.ONLINE
+            assert send.call_count == 2
+            assert "QQ 恢复" in send.call_args.args[1]
+            assert monitor.phase == Phase.HEALTHY
+
+    asyncio.run(scenario())
+
+
+def test_onebot_connection_refused():
+    async def scenario():
+        with socket.socket() as endpoint:
+            endpoint.bind(("127.0.0.1", 0))
+            port = endpoint.getsockname()[1]
+            settings = Settings.from_config({**CONFIG, "onebot_base_url": f"http://127.0.0.1:{port}"})
+            async with aiohttp.ClientSession() as session:
+                result = await probe(session, settings)
+        assert result.status is ProbeStatus.UNREACHABLE
+        assert "HTTP 连接或响应传输失败" in result.description
 
     asyncio.run(scenario())
 
@@ -220,7 +289,7 @@ def test_unknown_breaks_consecutive_offline_and_online_samples(tmp_path, monkeyp
         send = Mock()
         monkeypatch.setattr(watchdog, "send_mail", send)
         monitor = Watchdog(Settings.from_config(CONFIG), tmp_path / "watchdog.state", Mock())
-        auth = ProbeResult(issue="get_status 鉴权失败（HTTP 401）")
+        auth = ProbeResult(ProbeStatus.UNKNOWN, "get_status 鉴权失败（HTTP 401）")
         for sample in (OFFLINE, UNKNOWN, auth, UNKNOWN, OFFLINE):
             await monitor._apply_sample(sample)
         send.assert_not_called()
@@ -530,7 +599,7 @@ def test_smtp_errors_explain_failure_without_leaking_provider_response(error, su
 
 def test_archive_matches_astrbot_upload_layout(tmp_path):
     output = build(tmp_path)
-    assert output.parent.name == "v0.1.4"
+    assert output.parent.name == "v0.1.5"
     assert output.name == "astrbot_plugin_snowluma_watchdog.zip"
     with ZipFile(output) as archive:
         root = archive.infolist()[0]
@@ -539,7 +608,7 @@ def test_archive_matches_astrbot_upload_layout(tmp_path):
         archive.extractall(tmp_path / "extracted")
         assert all(Path(name).parts[0] == output.stem for name in archive.namelist())
     extracted = tmp_path / "extracted" / root.filename
-    assert "version: v0.1.4" in (extracted / "metadata.yaml").read_text(encoding="utf-8")
+    assert "version: v0.1.5" in (extracted / "metadata.yaml").read_text(encoding="utf-8")
     assert (extracted / "main.py").is_file()
     assert not (extracted / "tests").exists()
     assert hashlib.sha256(output.read_bytes()).hexdigest() in output.with_suffix(

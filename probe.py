@@ -1,6 +1,7 @@
 import asyncio
 import json
 from dataclasses import dataclass
+from enum import Enum
 
 import aiohttp
 
@@ -13,27 +14,38 @@ class ProbeError(Exception):
     """A OneBot failure with a message safe to log."""
 
 
+class ProbeStatus(Enum):
+    ONLINE = "online"
+    OFFLINE = "offline"
+    UNREACHABLE = "unreachable"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class ProbeResult:
-    online: bool | None = None
+    status: ProbeStatus
     issue: str | None = None
 
     @property
     def description(self) -> str:
-        if self.online is None:
-            return f"QQ 在线状态未知：{self.issue}" if self.issue else "QQ 在线状态未知"
-        return "QQ 在线（online=true）" if self.online else "QQ 账号离线（online=false）"
+        if self.status is ProbeStatus.ONLINE:
+            return "QQ 在线（online=true）"
+        if self.status is ProbeStatus.OFFLINE:
+            return "QQ 账号离线（online=false）"
+        return f"QQ 在线状态未知：{self.issue}" if self.issue else "QQ 在线状态未知"
 
 
 async def probe(session: aiohttp.ClientSession, settings: Settings) -> ProbeResult:
     try:
         return await asyncio.wait_for(_check(session, settings), settings.request_timeout)
     except asyncio.TimeoutError:
-        return ProbeResult(issue="SnowLuma OneBot HTTP 探测超时")
+        return ProbeResult(ProbeStatus.UNREACHABLE, "SnowLuma OneBot HTTP 探测超时")
     except ProbeError as error:
-        return ProbeResult(issue=str(error))
+        return ProbeResult(ProbeStatus.UNKNOWN, str(error))
+    except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError):
+        return ProbeResult(ProbeStatus.UNREACHABLE, "SnowLuma OneBot HTTP 连接或响应传输失败")
     except aiohttp.ClientError:
-        return ProbeResult(issue="SnowLuma OneBot HTTP 连接或响应传输失败")
+        return ProbeResult(ProbeStatus.UNKNOWN, "SnowLuma OneBot HTTP 客户端请求失败")
 
 
 async def _check(session: aiohttp.ClientSession, settings: Settings) -> ProbeResult:
@@ -46,7 +58,7 @@ async def _check(session: aiohttp.ClientSession, settings: Settings) -> ProbeRes
         user_id = login.get("user_id")
         if type(user_id) not in (int, str) or str(user_id) != settings.expected_qq:
             raise ProbeError("SnowLuma 返回的 QQ 号与监控配置不符")
-    return ProbeResult(online=online)
+    return ProbeResult(ProbeStatus.ONLINE if online else ProbeStatus.OFFLINE)
 
 
 async def _call(session: aiohttp.ClientSession, settings: Settings, action: str) -> dict:

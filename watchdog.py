@@ -6,7 +6,7 @@ from pathlib import Path
 import aiohttp
 
 from .mail import mail_failure_summary, send_mail
-from .probe import ProbeResult, probe
+from .probe import ProbeResult, ProbeStatus, probe
 from .settings import Settings
 
 SMTP_RETRY_SECONDS = 300
@@ -28,7 +28,7 @@ class Watchdog:
         self.phase = Phase.HEALTHY
         self.saved_phase = Phase.HEALTHY
         self.restored_outage = False
-        self.last_online: bool | None = None
+        self.last_status: ProbeStatus | None = None
         self.streak = 0
         self.next_mail_attempt = 0.0
 
@@ -68,16 +68,20 @@ class Watchdog:
             raise
 
     async def _apply_sample(self, result: ProbeResult) -> None:
-        if self.streak == 0:
+        status = result.status
+        if self.last_status is None:
             self.logger.info(f"{LOG_PREFIX} 首次探测：{result.description}")
-        elif result.online is None and self.last_online is not None:
+        elif (
+            status in (ProbeStatus.UNKNOWN, ProbeStatus.UNREACHABLE)
+            and self.last_status in (ProbeStatus.ONLINE, ProbeStatus.OFFLINE)
+        ):
             self.logger.warning(f"{LOG_PREFIX} {result.description}")
         else:
             self.logger.debug(f"{LOG_PREFIX} {result.description}")
-        self.streak = self.streak + 1 if self.last_online is result.online else 1
-        self.last_online = result.online
+        self.streak = self.streak + 1 if self.last_status is status else 1
+        self.last_status = status
 
-        if result.online is True and self.streak >= self.settings.recovery_threshold:
+        if status is ProbeStatus.ONLINE and self.streak >= self.settings.recovery_threshold:
             if self.phase in (Phase.OUTAGE, Phase.ALERT_SENT):
                 self.logger.info(f"{LOG_PREFIX} SnowLuma 已恢复")
                 send_recovery = self.phase == Phase.ALERT_SENT and self.settings.notify_recovery
@@ -87,10 +91,16 @@ class Watchdog:
                     await self._notify(result, Phase.HEALTHY)
                 else:
                     self._transition(Phase.HEALTHY)
-        if result.online is False and self.streak >= self.settings.failure_threshold:
+        if (
+            status in (ProbeStatus.OFFLINE, ProbeStatus.UNREACHABLE)
+            and self.streak >= self.settings.failure_threshold
+        ):
             if self.restored_outage or self.phase in (Phase.HEALTHY, Phase.RECOVERY_PENDING):
-                confirmation = "监控重启后确认离线" if self.restored_outage else "确认离线"
-                self.logger.warning(f"{LOG_PREFIX} {confirmation}：{result.description}")
+                prefix = "监控重启后" if self.restored_outage else ""
+                confirmation = (
+                    "确认离线" if status is ProbeStatus.OFFLINE else "确认 OneBot HTTP 不可达"
+                )
+                self.logger.warning(f"{LOG_PREFIX} {prefix}{confirmation}：{result.description}")
                 self._transition(Phase.OUTAGE)
             if self.phase == Phase.OUTAGE:
                 await self._notify(result, Phase.ALERT_SENT)
@@ -111,8 +121,12 @@ class Watchdog:
     async def _notify(self, result: ProbeResult, delivered_phase: Phase) -> None:
         if time.monotonic() < self.next_mail_attempt:
             return
-        kind = "恢复" if result.online is True else "离线"
-        subject = f"{LOG_PREFIX} QQ {kind}"
+        kind, title = {
+            ProbeStatus.ONLINE: ("恢复", "QQ 恢复"),
+            ProbeStatus.OFFLINE: ("离线", "QQ 离线"),
+            ProbeStatus.UNREACHABLE: ("故障", "OneBot HTTP 不可达"),
+        }[result.status]
+        subject = f"{LOG_PREFIX} {title}"
         body = f"监控状态：{result.description}"
         try:
             await asyncio.to_thread(send_mail, self.settings.mail, subject, body)

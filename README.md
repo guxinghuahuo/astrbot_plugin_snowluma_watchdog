@@ -1,6 +1,6 @@
-# SnowLuma 存活监控 v0.1.4
+# SnowLuma 存活监控 v0.1.5
 
-运行在 AstrBot 中的独立插件。它通过 SnowLuma OneBot HTTP 检查 QQ 账号是否在线，并通过 SMTP 向备用邮箱发送离线及恢复通知。需要 AstrBot 4.10.4 或更新版本。
+运行在 AstrBot 中的独立插件。它通过 SnowLuma OneBot HTTP 检查 QQ 账号是否在线，并通过 SMTP 向备用邮箱发送QQ 离线、OneBot HTTP 不可达和可选的恢复通知。需要 AstrBot 4.10.4 或更新版本。
 
 ## 安装和配置
 
@@ -22,11 +22,11 @@ Access Token 和 SMTP 授权码由 AstrBot 保存到插件配置中。日常日�
 
 ## 探测与告警
 
-插件使用带 Bearer 鉴权的 `POST /get_status`，只依据 `data.online` 判断 QQ 在线或离线，忽略收发链路的 `data.good`。配置了预期 QQ 号时，在线结果还要求 `get_login_info` 返回相同账号。请求超时、鉴权失败、接口不可达或返回无效时，日志会记录「QQ 在线状态未知」。未知结果会打断连续探测计数，离线和恢复邮件均需收到明确的状态结果。 [SnowLuma 状态 API](https://snowluma.github.io/zh/docs/api/system/get_status) · [SnowLuma 账号 API](https://snowluma.github.io/en/docs/api/system/get_login_info)
+插件使用带 Bearer 鉴权的 `POST /get_status`，只依据 `data.online` 判断 QQ 在线或离线，忽略收发链路的 `data.good`。配置了预期 QQ 号时，在线结果还要求 `get_login_info` 返回相同账号。连接失败、响应传输失败和探测超时均记为 OneBot HTTP 不可达，日志和邮件正文会注明「QQ 在线状态未知」。鉴权失败、其他 HTTP 状态错误或响应无效只记日志，并打断连续探测计数。 [SnowLuma 状态 API](https://snowluma.github.io/zh/docs/api/system/get_status) · [SnowLuma 账号 API](https://snowluma.github.io/en/docs/api/system/get_login_info)
 
-默认每 30 秒探测一次，整轮 HTTP 探测超时 5 秒。连续两次 `online=false` 后发送一封离线告警。连续两次 `online=true` 后确认恢复，可关闭恢复邮件。故障邮件送达 SMTP 后才会启用该次故障的恢复邮件。发送失败时，若通知仍适用，每隔至少 5 分钟重试。SMTP 接收成功会写入 AstrBot 日志。
+默认每 30 秒探测一次，整轮 HTTP 探测超时 5 秒。连续两次 `online=false` 后发送「QQ 离线」邮件。连续两次 HTTP 不可达后发送「OneBot HTTP 不可达」邮件。两类故障分别累计连续次数，使用同一个告警阈值。连续两次 `online=true` 后确认恢复，可关闭恢复邮件。故障邮件送达 SMTP 后才会启用该次故障的恢复邮件。发送失败时，若通知仍适用，每隔至少 5 分钟重试。SMTP 接收成功会写入 AstrBot 日志。
 
-同一次连续运行中，持续离线只告警一次。每次启动或重载都会在宽限期后重新累计探测结果。如果再次达到连续离线阈值，会重新告警。如果重启后先确认在线，插件会依据已保存的离线记录发送可选恢复邮件。v0.1.3 升级时开始一份新的离线记录，避免为旧版的链路异常告警发送恢复邮件。
+一次故障期间只发送一封告警邮件，即使探测结果在离线和 HTTP 不可达之间切换。每次启动或重载都会在宽限期后重新累计探测结果。如果再次达到故障阈值，会重新告警。如果重启后先确认在线，插件会依据已保存的告警记录发送可选恢复邮件。v0.1.3 升级时开始一份新的离线记录，避免为旧版的链路异常告警发送恢复邮件。
 
 ## 验证运行
 
@@ -45,10 +45,11 @@ python -m ruff check .
 python build_package.py
 ```
 
-打包结果和 SHA-256 校验文件位于 `dist/v0.1.4/`。
+打包结果和 SHA-256 校验文件位于 `dist/v0.1.5/`。
 
 ## 更新记录
 
+- v0.1.5 增加 OneBot HTTP 连接失败、响应传输失败和探测超时的邮件告警。
 - v0.1.4 通用化部署示例、默认地址与邮件主题，通知正文仅显示探测状态。
 - v0.1.3 只根据 QQ 在线状态告警，探测失败时记录状态未知。
 - v0.1.2 重启后重新确认故障，修复历史告警抑制新故障邮件的问题。
